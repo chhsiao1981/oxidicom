@@ -1,9 +1,9 @@
-use std::time::Duration;
-
 use crate::types::{AuthToken, CubeRegistrationParams, LoginParams};
 use reqwest::header::AUTHORIZATION;
 use reqwest::Error;
 use reqwest::Response;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{thread, time::Duration};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 pub(crate) async fn cube_publisher(
@@ -14,18 +14,40 @@ pub(crate) async fn cube_publisher(
 ) -> Result<(), Error> {
     let client = reqwest::Client::new();
 
-    let cube_chris_token = get_chris_token(&client, cube_login_url, cube_chris_password).await;
-    if cube_chris_token == "" {
-        // XXX TODO: error handling
-        tracing::error!(msg = "unable to get chris token");
-        return Ok(());
-    }
+    let params = LoginParams {
+        username: "chris".to_string(),
+        password: cube_chris_password,
+    };
+
+    let mut cube_chris_token = retry_get_chris_token(&client, &cube_login_url, &params).await;
+    let mut cube_chris_token_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should go forward")
+        .as_secs();
 
     while let Some((series, ndicom)) = rx.recv().await {
         tracing::info!(
             msg = "rx.recv",
-            series_instance_uid = series.SeriesInstanceUID,
+            series_instance_uid = &series.SeriesInstanceUID,
             ndicom = ndicom,
+        );
+        let current_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should go forward")
+            .as_secs();
+        if current_ts - cube_chris_token_ts > 3600 {
+            cube_chris_token = retry_get_chris_token(&client, &cube_login_url, &params).await;
+            let current_ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should go forward")
+                .as_secs();
+            cube_chris_token_ts = current_ts;
+        }
+        tracing::info!(
+            msg = "to post",
+            series_instance_uid = series.SeriesInstanceUID,
+            cube_chris_token = cube_chris_token,
+            cube_chris_token_ts = cube_chris_token_ts,
         );
         let pacs_name = series.pacs_name.clone();
         let series_instance_uid = series.SeriesInstanceUID.clone();
@@ -60,18 +82,36 @@ pub(crate) async fn cube_publisher(
     Ok(())
 }
 
+pub async fn retry_get_chris_token(
+    client: &reqwest::Client,
+    cube_login_url: &String,
+    params: &LoginParams,
+) -> String {
+    let mut token;
+    let mut count = 0;
+    loop {
+        token = get_chris_token(client, cube_login_url, params).await;
+        if !token.is_empty() {
+            return token;
+        }
+        tracing::info!(
+            msg = "cube_publisher.retry_get_chris_token: to sleep",
+            count = count
+        );
+
+        thread::sleep(Duration::from_secs(5));
+        count += 1;
+    }
+}
+
 pub async fn get_chris_token(
     client: &reqwest::Client,
-    cube_login_url: String,
-    cube_chris_password: String,
+    cube_login_url: &String,
+    params: &LoginParams,
 ) -> String {
-    let params = LoginParams {
-        username: "chris".to_string(),
-        password: cube_chris_password,
-    };
     let res = client
-        .post(&cube_login_url)
-        .json(&params)
+        .post(cube_login_url)
+        .json(params)
         .timeout(Duration::new(3, 0))
         .send()
         .await;
