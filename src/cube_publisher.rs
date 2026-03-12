@@ -9,21 +9,20 @@ use tokio::sync::mpsc::UnboundedReceiver;
 pub(crate) async fn cube_publisher(
     mut rx: UnboundedReceiver<CubeRegistrationParams>,
     cube_login_url: String,
+    cube_chris_username: String,
     cube_chris_password: String,
+    cube_chris_refresh_duration: i64,
     cube_series_url: String,
 ) -> Result<(), Error> {
     let client = reqwest::Client::new();
 
     let params = LoginParams {
-        username: "chris".to_string(),
+        username: cube_chris_username,
         password: cube_chris_password,
     };
 
     let mut cube_chris_token = retry_get_chris_token(&client, &cube_login_url, &params).await;
-    let mut cube_chris_token_ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time should go forward")
-        .as_secs();
+    let mut cube_chris_token_ts = now_ts();
 
     while let Some((series, ndicom)) = rx.recv().await {
         tracing::info!(
@@ -31,16 +30,10 @@ pub(crate) async fn cube_publisher(
             series_instance_uid = &series.SeriesInstanceUID,
             ndicom = ndicom,
         );
-        let current_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should go forward")
-            .as_secs();
-        if current_ts - cube_chris_token_ts > 3600 {
+        let current_ts = now_ts();
+        if current_ts - cube_chris_token_ts > cube_chris_refresh_duration {
             cube_chris_token = retry_get_chris_token(&client, &cube_login_url, &params).await;
-            let current_ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time should go forward")
-                .as_secs();
+            let current_ts = now_ts();
             cube_chris_token_ts = current_ts;
         }
         tracing::info!(
@@ -102,6 +95,13 @@ pub async fn retry_get_chris_token(
         thread::sleep(Duration::from_secs(5));
         count += 1;
     }
+}
+
+fn now_ts() -> i64 {
+    return SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should go forward")
+        .as_secs() as i64;
 }
 
 pub async fn get_chris_token(
